@@ -1,0 +1,11 @@
+# NSSA320 Lab 7
+# Local command-line inventory for validating managed Linux hosts
+# before configuring the AWX web inventory.
+
+[linux]
+ansible1 ansible_host=192.168.1.102
+ansible2 ansible_host=192.168.1.103
+
+[linux:vars]
+ansible_user=student
+ansible_python_interpreter=/usr/bin/python3.9
