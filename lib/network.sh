@@ -6,55 +6,24 @@
 # Shared network configuration and validation helpers for NSSA320 Lab 7.
 #
 # Purpose:
-#  - Map a Lab 7 Linux role to the correct static IP address
-#  - Detect the active NetworkManager connection and device
-#  - Apply static IPv4 settings idempotently
-#  - Validate IP address, default gateway, DNS, and gateway reachability
-#  - Display the current network state for troubleshooting
-#
-# Design:
-#  - This file does not automatically run actions when sourced.
-#  - Functions are called by scripts such as bootstrap-node.sh.
-#  - Network values are read from config/lab7.conf.
-#  - Output is handled through lib/common.sh.
-#  - Role-to-IP mapping is provided by lib/hosts.sh.
-#
-# RICE Framework:
-#  - Reproducibility: Network state comes from one configuration file.
-#  - Idempotency: Re-running applies the same network configuration.
-#  - Composability: Bootstrap and verification scripts can reuse these functions.
-#  - Evolvability: Subnet, gateway, DNS, and hosts can change in lab7.conf.
+#   - Map each Lab 7 Linux role to its static IP address
+#   - Detect the active NetworkManager connection and device
+#   - Apply static IPv4 settings
+#   - Validate IP address, gateway, DNS, and gateway reachability
+#   - Display current network state for troubleshooting
 #
 # Dependencies:
-#  - config/lab7.conf must be sourced before this file is used.
-#  - lib/common.sh must be sourced before this file is used.
-#  - lib/hosts.sh must be sourced before this file is used because it provides
-#    get_host_ip_for_role.
+#   - config/lab7.conf
+#   - lib/common.sh
+#   - lib/hosts.sh
 #
-# Author:
-#  - Jared Husson
-#
-# ==============================================================================
-# Version History
-# ==============================================================================
-#
-# Version: 2.0
-# Date: 2026-07-23
+# Version:
+#   2.1
 #
 # Changes:
-#  - Refactored the library for the Lab 7 AWX environment.
-#  - Updated the source guard, documentation, and temporary file names.
-#  - Added explicit Linux role validation before changing network settings.
-#  - Added a warning before restarting the active NetworkManager connection.
-#
-# Version: 1.1
-# Date: 2026-06-09
-#
-# Changes:
-#  - Added active NetworkManager connection detection.
-#  - Added role-based static IP configuration.
-#  - Added IP, route, DNS, and gateway validation helpers.
-#  - Added current network state display helper.
+#   - Prevented status output from contaminating command-substitution results.
+#   - Moved nmcli command validation outside value-returning helper functions.
+#   - Kept connection and device detection output clean and predictable.
 #
 # ==============================================================================
 
@@ -95,32 +64,29 @@ validate_network_role() {
 detect_active_nm_connection() {
     local connection
 
-    require_command nmcli
-
     connection="$(
-        nmcli -t -f NAME,DEVICE con show --active |
-        awk -F: '$2 != "" {print $1; exit}'
+        nmcli -t -f NAME,DEVICE connection show --active |
+            awk -F: '$2 != "" {print $1; exit}'
     )"
 
     if [[ -z "$connection" ]]; then
-        die "No active NetworkManager connection found."
+        die "No active NetworkManager connection found"
     fi
 
     printf '%s\n' "$connection"
 }
 
+
 detect_active_nm_device() {
     local device
 
-    require_command nmcli
-
     device="$(
-        nmcli -t -f NAME,DEVICE con show --active |
-        awk -F: '$2 != "" {print $2; exit}'
+        nmcli -t -f NAME,DEVICE connection show --active |
+            awk -F: '$2 != "" {print $2; exit}'
     )"
 
     if [[ -z "$device" ]]; then
-        die "No active NetworkManager device found."
+        die "No active NetworkManager device found"
     fi
 
     printf '%s\n' "$device"
@@ -134,21 +100,27 @@ detect_active_nm_device() {
 show_network_state() {
     step "Current network state"
 
+    require_command hostname
+    require_command ip
+    require_command nmcli
+
     info "Hostname:"
     hostname
 
     info "IPv4 addresses:"
-    ip -4 -brief addr show || warn "Unable to show IPv4 addresses"
+    ip -4 -brief address show ||
+        warn "Unable to show IPv4 addresses"
 
     info "Routing table:"
-    ip route || warn "Unable to show routing table"
+    ip route ||
+        warn "Unable to show routing table"
 
     info "Active NetworkManager connections:"
-    nmcli con show --active ||
+    nmcli connection show --active ||
         warn "Unable to show active NetworkManager connections"
 
     info "DNS configuration from NetworkManager:"
-    nmcli dev show |
+    nmcli device show |
         grep -E 'IP4.DNS|GENERAL.DEVICE' ||
         warn "Unable to show DNS configuration"
 }
@@ -166,6 +138,8 @@ configure_network_for_role() {
 
     validate_network_role "$role"
 
+    require_command nmcli
+
     expected_ip="$(get_host_ip_for_role "$role")"
     connection="$(detect_active_nm_connection)"
     device="$(detect_active_nm_device)"
@@ -179,35 +153,35 @@ configure_network_for_role() {
     info "Gateway: ${GATEWAY_IP}"
     info "DNS servers: ${DNS_SERVERS}"
 
-    nmcli con mod "$connection" \
+    nmcli connection modify "$connection" \
         ipv4.addresses "${expected_ip}/${SUBNET_PREFIX}" ||
         die "Failed to set IPv4 address on ${connection}"
 
-    nmcli con mod "$connection" \
+    nmcli connection modify "$connection" \
         ipv4.gateway "$GATEWAY_IP" ||
         die "Failed to set IPv4 gateway on ${connection}"
 
-    nmcli con mod "$connection" \
+    nmcli connection modify "$connection" \
         ipv4.dns "$DNS_SERVERS" ||
         die "Failed to set IPv4 DNS servers on ${connection}"
 
-    nmcli con mod "$connection" \
+    nmcli connection modify "$connection" \
         ipv4.method manual ||
         die "Failed to set IPv4 method to manual on ${connection}"
 
-    nmcli con mod "$connection" \
+    nmcli connection modify "$connection" \
         connection.autoconnect yes ||
         die "Failed to enable autoconnect on ${connection}"
 
     pass "Static IPv4 settings applied to ${connection}"
 
-    warn "Restarting the active connection may temporarily interrupt SSH access."
+    warn "Restarting the active connection may temporarily interrupt SSH access"
     info "Restarting NetworkManager connection: ${connection}"
 
-    nmcli con down "$connection" >/dev/null 2>&1 ||
+    nmcli connection down "$connection" >/dev/null 2>&1 ||
         warn "Connection ${connection} was not cleanly brought down"
 
-    nmcli con up "$connection" ||
+    nmcli connection up "$connection" ||
         die "Failed to bring connection ${connection} back up"
 
     pass "Network connection restarted successfully"
@@ -223,13 +197,16 @@ validate_ip_for_role() {
     local expected_ip
 
     validate_network_role "$role"
+
+    require_command ip
+
     expected_ip="$(get_host_ip_for_role "$role")"
 
     step "Validating IPv4 address"
 
     info "Expected IP: ${expected_ip}/${SUBNET_PREFIX}"
 
-    if ip -4 addr show |
+    if ip -4 address show |
         grep -Fq "${expected_ip}/${SUBNET_PREFIX}"; then
 
         pass "Expected IP address is configured: ${expected_ip}/${SUBNET_PREFIX}"
@@ -238,11 +215,14 @@ validate_ip_for_role() {
 
     fail "Expected IP address not found: ${expected_ip}/${SUBNET_PREFIX}"
     info "Current IPv4 addresses:"
-    ip -4 -brief addr show
+    ip -4 -brief address show
     return 1
 }
 
+
 validate_default_gateway() {
+    require_command ip
+
     step "Validating default gateway"
 
     info "Expected default gateway: ${GATEWAY_IP}"
@@ -260,8 +240,11 @@ validate_default_gateway() {
     return 1
 }
 
+
 validate_gateway_ping() {
     local output_file="/tmp/lab7_gateway_ping.out"
+
+    require_command ping
 
     step "Validating gateway reachability"
 
@@ -278,9 +261,12 @@ validate_gateway_ping() {
     return 1
 }
 
+
 validate_dns_resolution() {
     local dns_test_host="${1:-github.com}"
     local output_file="/tmp/lab7_dns_test.out"
+
+    require_command getent
 
     step "Validating external DNS resolution"
 
@@ -296,6 +282,7 @@ validate_dns_resolution() {
     fail "External DNS resolution failed for ${dns_test_host}"
     return 1
 }
+
 
 validate_network_for_role() {
     local role="$1"
