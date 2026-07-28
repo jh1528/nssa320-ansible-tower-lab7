@@ -4,59 +4,38 @@
 # File: scripts/setup-managed-hosts.sh
 #
 # Purpose:
-#   Prepares ansible1 and ansible2 for Ansible CLI and AWX access.
-#
-#   This script:
-#     - creates or validates the Lab 7 Linux inventory
-#     - verifies initial SSH access using the student account
-#     - safely creates or reuses an ED25519 SSH key pair
-#     - copies the public key to both managed Linux hosts
-#     - verifies non-interactive key-based SSH access
-#     - verifies Ansible connectivity
+#   Prepares ansible1 and ansible2 for command-line Ansible and AWX access.
 #
 # Scope:
-#   Lab 7 Linux managed hosts only:
-#
-#     ansible1
-#     ansible2
+#   Linux managed hosts only:
+#     - ansible1
+#     - ansible2
 #
 #   Ubuntu and Windows are intentionally excluded.
 #
 # Safety:
-#   Supports --dry-run and --apply.
-#   Must run as the normal student user, not with sudo.
-#   Never overwrites an existing SSH key pair.
-#   Stops if only one half of the SSH key pair exists.
-#   Does not configure passwordless sudo.
-#   Does not store passwords or private keys in the repository.
-#
-# Design:
-#   The existing student account is used for initial SSH access,
-#   command-line Ansible, and the AWX Machine Credential.
-#
-#   Passwordless sudo is configured separately by:
-#
-#     scripts/setup-privilege-escalation.sh
+#   - Supports --dry-run and --apply.
+#   - Must run as the normal student user, not with sudo.
+#   - Reuses an existing ED25519 key pair.
+#   - Never overwrites an existing SSH key.
+#   - Stops if only one half of the configured key pair exists.
+#   - Does not configure passwordless sudo.
+#   - Does not store passwords or private keys in the repository.
 #
 # RICE Notes:
-#   Reproducibility - performs the same preparation sequence on every run.
-#   Idempotency     - reuses existing keys and rewrites inventory only if needed.
-#   Composability   - keeps SSH preparation separate from privilege escalation.
-#   Evolvability    - aligns the framework with the Lab 7 AWX workflow.
+#   Reproducibility - performs the same managed-host workflow each run.
+#   Idempotency     - reuses keys and rewrites inventory only when needed.
+#   Composability   - keeps SSH setup separate from privilege escalation.
+#   Evolvability    - supports CLI validation before AWX configuration.
 #
 # Version History:
-#   v2.1 - Clean full-file replacement after duplicate-script corruption.
-#          Added safe evidence-archive function compatibility.
-#   v2.0 - Removed Ubuntu and separate ansible service-account workflows.
-#          Standardized the inventory group as linux.
-#          Added ED25519 key creation, deployment, and verification.
+#   v2.1 - Clean Lab 7 replacement based on the Lab 4 workflow.
+#          Removed Ubuntu and separate service-account creation.
+#          Standardized managed hosts under the linux inventory group.
+#          Added SSH-key and Ansible connectivity verification.
 #   v1.0 - Initial Lab 7 migration.
 
 set -euo pipefail
-
-# ---------------------------------------------------------------------------
-# Path setup
-# ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -64,7 +43,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
-# Load shared configuration and libraries
+# Shared configuration and libraries
 # ---------------------------------------------------------------------------
 
 source "${REPO_ROOT}/config/lab7.conf"
@@ -79,7 +58,7 @@ SCRIPT_NAME="$(basename "$0")"
 # ---------------------------------------------------------------------------
 
 usage() {
-  cat <<EOF
+  cat <<EOF_USAGE
 Usage:
   ${SCRIPT_NAME} --dry-run
   ${SCRIPT_NAME} --apply
@@ -89,16 +68,16 @@ Description:
   Prepares the Lab 7 Rocky Linux managed hosts for Ansible CLI and AWX access.
 
 Modes:
-  --dry-run   Show the planned validation and configuration actions.
-  --apply     Prepare inventory, ED25519 authentication, and connectivity.
+  --dry-run   Show what would be checked or changed without changing hosts.
+  --apply     Create or update inventory, prepare SSH keys, and verify access.
   --help      Display this help message.
 
-Managed-host setup actions:
+Managed-host workflow:
   1. Confirm normal-user execution.
   2. Validate required commands and configuration.
-  3. Create or update inventory.inv.
+  3. Create or update the Lab 7 inventory.
   4. Validate the linux inventory group.
-  5. Verify initial SSH access as student.
+  5. Verify initial SSH access as the student user.
   6. Reuse or create an ED25519 SSH key pair.
   7. Copy the public key to ansible1 and ansible2.
   8. Verify passwordless key-based SSH access.
@@ -106,11 +85,11 @@ Managed-host setup actions:
 
 Passwordless sudo is configured separately with:
   ./scripts/setup-privilege-escalation.sh --apply
-EOF
+EOF_USAGE
 }
 
 # ---------------------------------------------------------------------------
-# Context
+# Context and validation
 # ---------------------------------------------------------------------------
 
 show_managed_host_context() {
@@ -136,10 +115,6 @@ show_managed_host_context() {
   done
 }
 
-# ---------------------------------------------------------------------------
-# Required command checks
-# ---------------------------------------------------------------------------
-
 check_required_commands() {
   local command_name
 
@@ -151,10 +126,6 @@ check_required_commands() {
 
   pass "All required managed-host commands are available"
 }
-
-# ---------------------------------------------------------------------------
-# Configuration validation
-# ---------------------------------------------------------------------------
 
 validate_managed_host_configuration() {
   step "Validating managed-host configuration"
@@ -186,6 +157,15 @@ validate_managed_host_configuration() {
   [[ -n "${MANAGED_HOSTS_SSH_CONNECT_TIMEOUT_SECONDS:-}" ]] \
     || die "MANAGED_HOSTS_SSH_CONNECT_TIMEOUT_SECONDS is not configured"
 
+  [[ -n "${MANAGED_HOSTS_EVIDENCE_DIR:-}" ]] \
+    || die "MANAGED_HOSTS_EVIDENCE_DIR is not configured"
+
+  [[ -n "${MANAGED_HOSTS_ARCHIVE_DIR:-}" ]] \
+    || die "MANAGED_HOSTS_ARCHIVE_DIR is not configured"
+
+  [[ -n "${MANAGED_HOSTS_SETUP_OUTPUT:-}" ]] \
+    || die "MANAGED_HOSTS_SETUP_OUTPUT is not configured"
+
   [[ "${#MANAGED_HOSTS_LINUX[@]}" -gt 0 ]] \
     || die "No Linux managed hosts are configured"
 
@@ -200,9 +180,7 @@ inventory_matches_expected_content() {
   local current_content
   local expected_content
 
-  if [[ ! -f "$MANAGED_HOSTS_INVENTORY_FILE" ]]; then
-    return 1
-  fi
+  [[ -f "$MANAGED_HOSTS_INVENTORY_FILE" ]] || return 1
 
   current_content="$(cat "$MANAGED_HOSTS_INVENTORY_FILE")"
   expected_content="${MANAGED_HOSTS_INVENTORY_CONTENT%$'\n'}"
@@ -256,16 +234,14 @@ validate_inventory() {
 
   printf '%s\n' "$inventory_graph"
 
-  if ! grep -Fq -- "@${MANAGED_HOSTS_LINUX_GROUP}:" <<< "$inventory_graph"; then
-    die "Inventory group is missing: ${MANAGED_HOSTS_LINUX_GROUP}"
-  fi
+  grep -Fq -- "@${MANAGED_HOSTS_LINUX_GROUP}:" <<< "$inventory_graph" \
+    || die "Inventory group is missing: ${MANAGED_HOSTS_LINUX_GROUP}"
 
-  pass "Inventory contains target group: ${MANAGED_HOSTS_LINUX_GROUP}"
+  pass "Inventory contains group: ${MANAGED_HOSTS_LINUX_GROUP}"
 
   for host in "${MANAGED_HOSTS_LINUX[@]}"; do
-    if ! grep -Fq -- "--${host}" <<< "$inventory_graph"; then
-      die "Inventory host is missing: ${host}"
-    fi
+    grep -Fq -- "--${host}" <<< "$inventory_graph" \
+      || die "Inventory host is missing: ${host}"
 
     pass "Inventory contains managed host: ${host}"
   done
@@ -274,13 +250,13 @@ validate_inventory() {
 }
 
 # ---------------------------------------------------------------------------
-# Basic SSH validation
+# SSH access
 # ---------------------------------------------------------------------------
 
 verify_basic_ssh_access() {
   local host
 
-  step "Verifying basic SSH access"
+  step "Verifying initial SSH access"
 
   info "Remote user: ${MANAGED_HOSTS_REMOTE_USER}"
   info "First-time host-key prompts and password prompts are allowed."
@@ -291,16 +267,12 @@ verify_basic_ssh_access() {
     ssh \
       -o ConnectTimeout="${MANAGED_HOSTS_SSH_CONNECT_TIMEOUT_SECONDS}" \
       "${MANAGED_HOSTS_REMOTE_USER}@${host}" \
-      'echo "remote hostname: $(hostname)"; echo "remote user: $(whoami)"; echo "remote date: $(date)"' \
+      'printf "remote hostname: %s\nremote user: %s\nremote date: %s\n" "$(hostname)" "$(whoami)" "$(date)"' \
       || die "Basic SSH access failed: ${MANAGED_HOSTS_REMOTE_USER}@${host}"
 
     pass "Basic SSH access succeeded: ${MANAGED_HOSTS_REMOTE_USER}@${host}"
   done
 }
-
-# ---------------------------------------------------------------------------
-# ED25519 key management
-# ---------------------------------------------------------------------------
 
 ensure_ed25519_key_pair() {
   local private_key
@@ -330,7 +302,7 @@ ensure_ed25519_key_pair() {
     die "Public key exists, but private key is missing: ${private_key}"
   fi
 
-  info "No ED25519 SSH key pair exists at the configured path"
+  info "No ED25519 key pair exists at the configured path"
   info "Creating a new ED25519 key pair for Lab 7 automation"
 
   mkdir -p "$ssh_directory" \
@@ -352,9 +324,8 @@ ensure_ed25519_key_pair() {
   chmod 644 "$public_key" \
     || die "Failed to set public-key permissions: ${public_key}"
 
-  if [[ ! -f "$private_key" || ! -f "$public_key" ]]; then
-    die "ED25519 key generation did not produce both required files"
-  fi
+  [[ -f "$private_key" && -f "$public_key" ]] \
+    || die "ED25519 key generation did not produce both required files"
 
   pass "ED25519 SSH key pair created successfully"
   info "Private key: ${private_key}"
@@ -398,7 +369,7 @@ verify_key_based_ssh_access() {
       -o PasswordAuthentication=no \
       -o ConnectTimeout="${MANAGED_HOSTS_SSH_CONNECT_TIMEOUT_SECONDS}" \
       "${MANAGED_HOSTS_REMOTE_USER}@${host}" \
-      'echo "remote hostname: $(hostname)"; echo "remote user: $(whoami)"; echo "authentication: ssh-key"' \
+      'printf "remote hostname: %s\nremote user: %s\nauthentication: ssh-key\n" "$(hostname)" "$(whoami)"' \
       || die "Key-based SSH access failed: ${MANAGED_HOSTS_REMOTE_USER}@${host}"
 
     pass "Key-based SSH access succeeded: ${MANAGED_HOSTS_REMOTE_USER}@${host}"
@@ -406,7 +377,7 @@ verify_key_based_ssh_access() {
 }
 
 # ---------------------------------------------------------------------------
-# Ansible connectivity validation
+# Ansible connectivity
 # ---------------------------------------------------------------------------
 
 verify_ansible_connectivity() {
@@ -416,6 +387,7 @@ verify_ansible_connectivity() {
     -i "$MANAGED_HOSTS_INVENTORY_FILE" \
     "$MANAGED_HOSTS_LINUX_GROUP" \
     -m ansible.builtin.ping \
+    -u "$MANAGED_HOSTS_REMOTE_USER" \
     --private-key "$MANAGED_HOSTS_SSH_KEY_PATH" \
     || die "Ansible ping failed for the Lab 7 Linux group"
 
@@ -432,7 +404,6 @@ archive_previous_setup_evidence() {
       "$MANAGED_HOSTS_SETUP_OUTPUT" \
       "$MANAGED_HOSTS_ARCHIVE_DIR" \
       "managed-hosts-setup"
-
     return 0
   fi
 
@@ -441,7 +412,6 @@ archive_previous_setup_evidence() {
       "$MANAGED_HOSTS_SETUP_OUTPUT" \
       "$MANAGED_HOSTS_ARCHIVE_DIR" \
       "managed-hosts-setup"
-
     return 0
   fi
 
@@ -471,7 +441,7 @@ dry_run() {
     if inventory_matches_expected_content; then
       pass "Inventory already matches the expected Lab 7 content"
     else
-      warn "Would update the inventory because its content differs"
+      warn "Would rewrite the inventory because its content differs"
     fi
   else
     warn "Would create inventory: ${MANAGED_HOSTS_INVENTORY_FILE}"
@@ -485,16 +455,12 @@ dry_run() {
 
   step "Dry-run ED25519 key plan"
 
-  if [[ -f "$MANAGED_HOSTS_SSH_KEY_PATH" &&
+  if [[ -f "$MANAGED_HOSTS_SSH_KEY_PATH" && \
         -f "$MANAGED_HOSTS_SSH_PUBLIC_KEY_PATH" ]]; then
-
     pass "Would reuse the existing ED25519 key pair"
-
-  elif [[ ! -f "$MANAGED_HOSTS_SSH_KEY_PATH" &&
+  elif [[ ! -f "$MANAGED_HOSTS_SSH_KEY_PATH" && \
           ! -f "$MANAGED_HOSTS_SSH_PUBLIC_KEY_PATH" ]]; then
-
     warn "Would create a new ED25519 key pair"
-
   else
     fail "The configured SSH key pair is incomplete"
     info "Private key: ${MANAGED_HOSTS_SSH_KEY_PATH}"
