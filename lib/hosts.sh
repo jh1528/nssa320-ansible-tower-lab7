@@ -6,23 +6,23 @@
 # Shared hostname and /etc/hosts helpers for NSSA320 Lab 7.
 #
 # Purpose:
-#  - Map a Lab 7 Linux role to the correct hostname, FQDN, and IP address
-#  - Set the system hostname idempotently
-#  - Manage the Lab 7 /etc/hosts block idempotently
-#  - Validate local hostname and short-name resolution
+#  - Map each Lab 7 Linux system role to its hostname, FQDN, and IP address.
+#  - Set the local system hostname idempotently.
+#  - Manage the Lab 7 /etc/hosts block idempotently.
+#  - Validate local hostname and short-name resolution.
 #
 # Design:
 #  - This file does not automatically run actions when sourced.
 #  - Functions are called by scripts such as bootstrap-node.sh.
-#  - Host data is read from config/lab7.conf.
-#  - Output is handled through lib/common.sh.
-#  - Windows is included in /etc/hosts, but is not bootstrapped by this library.
+#  - Host data and managed block content come from config/lab7.conf.
+#  - Output and safety helpers come from lib/common.sh.
+#  - Windows is included in /etc/hosts but is not bootstrapped here.
 #
 # RICE Framework:
-#  - Reproducibility: Hostname and /etc/hosts values come from one config file.
-#  - Idempotency: Existing managed /etc/hosts blocks are replaced, not duplicated.
-#  - Composability: Bootstrap and verification scripts can reuse these functions.
-#  - Evolvability: New hosts can be added by updating the configuration and mapping.
+#  - Reproducibility: Host values come from one shared configuration file.
+#  - Idempotency: /etc/hosts changes only when its managed block differs.
+#  - Composability: Setup and verification scripts reuse these functions.
+#  - Evolvability: Host definitions can be updated through lab7.conf.
 #
 # Dependencies:
 #  - config/lab7.conf must be sourced before this file is used.
@@ -34,6 +34,16 @@
 # ==============================================================================
 # Version History
 # ==============================================================================
+#
+# Version: 2.1
+# Date: 2026-07-28
+#
+# Changes:
+#  - Removed Ubuntu from the official Lab 7 role mappings and validation.
+#  - Reused LAB7_HOSTS_CONTENT and managed-block markers from lab7.conf.
+#  - Added comparison logic to avoid unnecessary /etc/hosts rewrites.
+#  - Changed backup behavior so backups are created only before real changes.
+#  - Preserved migration cleanup for earlier Lab 4 and Lab 7 blocks.
 #
 # Version: 2.0
 # Date: 2026-07-23
@@ -85,11 +95,8 @@ get_host_short_for_role() {
         ansible2)
             printf '%s\n' "$ANSIBLE2_HOST"
             ;;
-        ubuntu)
-            printf '%s\n' "$UBUNTU_HOST"
-            ;;
         *)
-            die "Unknown role '${role}'. Valid roles: awx, ansible1, ansible2, ubuntu"
+            die "Unknown role '${role}'. Valid roles: awx, ansible1, ansible2"
             ;;
     esac
 }
@@ -107,11 +114,8 @@ get_host_ip_for_role() {
         ansible2)
             printf '%s\n' "$ANSIBLE2_IP"
             ;;
-        ubuntu)
-            printf '%s\n' "$UBUNTU_IP"
-            ;;
         *)
-            die "Unknown role '${role}'. Valid roles: awx, ansible1, ansible2, ubuntu"
+            die "Unknown role '${role}'. Valid roles: awx, ansible1, ansible2"
             ;;
     esac
 }
@@ -121,6 +125,7 @@ get_host_fqdn_for_role() {
     local short_name
 
     short_name="$(get_host_short_for_role "$role")"
+
     printf '%s.%s\n' "$short_name" "$DOMAIN"
 }
 
@@ -187,6 +192,39 @@ validate_hostname_for_role() {
 
 
 # ==============================================================================
+# /etc/hosts Block Inspection
+# ==============================================================================
+
+get_current_lab_hosts_block() {
+    awk \
+        -v start_marker="$LAB7_HOSTS_BLOCK_START" \
+        -v end_marker="$LAB7_HOSTS_BLOCK_END" \
+        '
+        $0 == start_marker {
+            inside_block = 1
+        }
+
+        inside_block {
+            print
+        }
+
+        $0 == end_marker {
+            inside_block = 0
+            exit
+        }
+        ' /etc/hosts
+}
+
+lab_hosts_block_is_current() {
+    local current_content
+
+    current_content="$(get_current_lab_hosts_block)"
+
+    [[ "$current_content" == "$LAB7_HOSTS_CONTENT" ]]
+}
+
+
+# ==============================================================================
 # /etc/hosts Management
 # ==============================================================================
 
@@ -203,45 +241,92 @@ backup_hosts_file() {
     pass "Backup created: ${backup_file}"
 }
 
+remove_hosts_block_from_file() {
+    local file_path="$1"
+    local start_marker="$2"
+    local end_marker="$3"
+    local temporary_file
+
+    temporary_file="$(mktemp)" \
+        || die "Failed to create a temporary hosts file"
+
+    awk \
+        -v start_marker="$start_marker" \
+        -v end_marker="$end_marker" \
+        '
+        $0 == start_marker {
+            inside_block = 1
+            next
+        }
+
+        $0 == end_marker {
+            inside_block = 0
+            next
+        }
+
+        !inside_block {
+            print
+        }
+        ' "$file_path" > "$temporary_file" \
+        || {
+            rm -f "$temporary_file"
+            die "Failed to remove managed block from ${file_path}"
+        }
+
+    cat "$temporary_file" > "$file_path" \
+        || {
+            rm -f "$temporary_file"
+            die "Failed to update ${file_path}"
+        }
+
+    rm -f "$temporary_file"
+}
+
 remove_managed_hosts_blocks() {
     info "Removing existing Lab 7 managed block if present"
 
-    sed -i \
-        '/# BEGIN NSSA320 LAB7 HOSTS/,/# END NSSA320 LAB7 HOSTS/d' \
-        /etc/hosts \
-        || die "Failed to remove the existing Lab 7 hosts block"
+    remove_hosts_block_from_file \
+        "/etc/hosts" \
+        "$LAB7_HOSTS_BLOCK_START" \
+        "$LAB7_HOSTS_BLOCK_END"
+
+    info "Removing earlier Lab 7 managed block if present"
+
+    remove_hosts_block_from_file \
+        "/etc/hosts" \
+        "# BEGIN NSSA320 LAB7 HOSTS" \
+        "# END NSSA320 LAB7 HOSTS"
 
     info "Removing old Lab 4 managed block if present"
 
-    sed -i \
-        '/# BEGIN NSSA320 LAB4 HOSTS/,/# END NSSA320 LAB4 HOSTS/d' \
-        /etc/hosts \
-        || die "Failed to remove the old Lab 4 hosts block"
+    remove_hosts_block_from_file \
+        "/etc/hosts" \
+        "# BEGIN NSSA320 LAB4 HOSTS" \
+        "# END NSSA320 LAB4 HOSTS"
 }
 
 write_lab_hosts_block() {
-    step "Writing Lab 7 managed block to /etc/hosts"
+    step "Managing Lab 7 /etc/hosts block"
+
+    if lab_hosts_block_is_current; then
+        pass "Lab 7 /etc/hosts block is already current"
+        return 0
+    fi
+
+    info "The Lab 7 managed block is missing or outdated"
 
     backup_hosts_file
     remove_managed_hosts_blocks
 
-    info "Appending refreshed Lab 7 hosts block"
+    info "Appending the current Lab 7 managed block"
 
-    cat >> /etc/hosts <<EOF
+    {
+        printf '\n'
+        printf '%s\n' "$LAB7_HOSTS_CONTENT"
+    } >> /etc/hosts \
+        || die "Failed to append the Lab 7 hosts block"
 
-# BEGIN NSSA320 LAB7 HOSTS
-# Managed by the Lab 7 bootstrap scripts.
-# Do not manually edit inside this block unless config/lab7.conf is also updated.
-${AWX_IP}      ${AWX_FQDN}       ${AWX_HOST}
-${ANSIBLE1_IP} ${ANSIBLE1_FQDN}  ${ANSIBLE1_HOST}
-${ANSIBLE2_IP} ${ANSIBLE2_FQDN}  ${ANSIBLE2_HOST}
-${UBUNTU_IP}   ${UBUNTU_FQDN}    ${UBUNTU_HOST}
-${WIN11_IP}    ${WIN11_FQDN}     ${WIN11_HOST}
-${GATEWAY_IP}  ${GATEWAY_FQDN}   ${GATEWAY_HOST}
-# END NSSA320 LAB7 HOSTS
-EOF
-
-    pass "Lab 7 /etc/hosts block written"
+    pass "Lab 7 /etc/hosts block updated successfully"
 }
 
 
@@ -252,11 +337,11 @@ EOF
 validate_hosts_resolution() {
     local failed=0
     local host
+
     local hosts_to_check=(
         "$AWX_HOST"
         "$ANSIBLE1_HOST"
         "$ANSIBLE2_HOST"
-        "$UBUNTU_HOST"
         "$WIN11_HOST"
         "$GATEWAY_HOST"
     )
@@ -291,11 +376,8 @@ validate_hosts_resolution() {
 show_lab_hosts_block() {
     step "Displaying Lab 7 /etc/hosts managed block"
 
-    if grep -q '# BEGIN NSSA320 LAB7 HOSTS' /etc/hosts; then
-        sed -n \
-            '/# BEGIN NSSA320 LAB7 HOSTS/,/# END NSSA320 LAB7 HOSTS/p' \
-            /etc/hosts
-
+    if grep -Fqx "$LAB7_HOSTS_BLOCK_START" /etc/hosts; then
+        get_current_lab_hosts_block
         return 0
     fi
 
