@@ -6,12 +6,12 @@
 # Read-only health-check script for NSSA320 Lab 7.
 #
 # Purpose:
-#  - Validate that a Lab 7 Linux node is in a healthy state
+#  - Validate that a Lab 7 Linux node is in a healthy state.
 #  - Check host identity, /etc/hosts resolution, network state, SSH status,
-#    and basic system readiness
-#  - Support checking one Linux role or displaying all Lab 7 role expectations
-#  - Include the Windows 11 host in the all-role resolution overview
-#  - Provide PASS, WARN, and FAIL output through shared common.sh helpers
+#    and basic system readiness.
+#  - Support checking one Linux role or displaying all Lab 7 host expectations.
+#  - Include the Windows 11 host in the all-host resolution overview.
+#  - Provide PASS, WARN, and FAIL output through shared common.sh helpers.
 #
 # Design:
 #  - This script does not change system configuration.
@@ -20,13 +20,13 @@
 #      awx
 #      ansible1
 #      ansible2
-#      ubuntu
 #  - The all mode displays and validates resolution for:
 #      awx
 #      ansible1
 #      ansible2
-#      ubuntu
 #      win11
+#      gateway
+#  - Linux role collections are read from config/lab7.conf.
 #
 # RICE Framework:
 #  - Reproducibility: Runs the same validation process every time.
@@ -40,6 +40,16 @@
 # ==============================================================================
 # Version History
 # ==============================================================================
+#
+# Version: 2.1
+# Date: 2026-07-28
+#
+# Changes:
+#  - Removed Ubuntu from the official Lab 7 health-check workflow.
+#  - Reused Linux and all-host collections from config/lab7.conf.
+#  - Updated argument validation, examples, and documentation.
+#  - Added dedicated host-value helpers for Windows 11 and the gateway.
+#  - Preserved read-only hostname, network, SSH, disk, memory, and CPU checks.
 #
 # Version: 2.0
 # Date: 2026-07-24
@@ -64,7 +74,8 @@
 # Notes:
 #  - Deep checks such as hostname, local IP, SSH service, memory, disk, and CPU
 #    are only meaningful for the Linux VM where this script is running.
-#  - Windows 11 is included in all mode for name-resolution verification.
+#  - Windows 11 and the gateway are included in all mode for name-resolution
+#    verification only.
 #
 # ==============================================================================
 
@@ -92,26 +103,6 @@ source "${BASE_DIR}/lib/ssh.sh"
 
 
 # ==============================================================================
-# Globals
-# ==============================================================================
-
-LAB7_LINUX_ROLES=(
-    "awx"
-    "ansible1"
-    "ansible2"
-    "ubuntu"
-)
-
-LAB7_ALL_ROLES=(
-    "awx"
-    "ansible1"
-    "ansible2"
-    "ubuntu"
-    "win11"
-)
-
-
-# ==============================================================================
 # Usage and Argument Handling
 # ==============================================================================
 
@@ -124,7 +115,6 @@ Deep health-check roles:
   awx
   ansible1
   ansible2
-  ubuntu
 
 Overview mode:
   all
@@ -132,36 +122,101 @@ Overview mode:
 Examples:
   $0 awx
   $0 ansible1
-  $0 ubuntu
+  $0 ansible2
   $0 all
 
 Description:
   Runs read-only Lab 7 health checks for the selected Linux node.
 
-  The all mode displays Lab 7 role definitions and validates local hostname
-  resolution for AWX, the managed Linux hosts, Windows 11, and the gateway.
+  The all mode displays the Lab 7 host definitions and validates local hostname
+  resolution for AWX, the two Rocky Linux managed hosts, Windows 11, and the
+  pfSense gateway.
 
-  Deep operating-system checks only apply to the Linux VM where this script
+  Deep operating-system checks apply only to the Linux VM where this script
   is currently running.
 EOF
+}
+
+is_supported_linux_role() {
+    local requested_role="${1:-}"
+    local configured_role
+
+    for configured_role in "${LAB7_LINUX_ROLES[@]}"; do
+        if [[ "$requested_role" == "$configured_role" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 validate_role_argument() {
     local role="${1:-}"
 
-    case "$role" in
-        awx|ansible1|ansible2|ubuntu|all)
-            return 0
+    if [[ "$role" == "all" ]]; then
+        return 0
+    fi
+
+    if [[ "$role" == "win11" ]]; then
+        fail "Deep local health checks are not supported for the Windows 11 host."
+        info "Use '$0 all' to validate Windows 11 hostname resolution."
+        exit 2
+    fi
+
+    if [[ "$role" == "$GATEWAY_HOST" ]]; then
+        fail "Deep local health checks are not supported for the gateway."
+        info "Use '$0 all' to validate gateway hostname resolution."
+        exit 2
+    fi
+
+    if is_supported_linux_role "$role"; then
+        return 0
+    fi
+
+    fail "Invalid role: ${role}"
+    usage
+    exit 2
+}
+
+
+# ==============================================================================
+# Host Value Helpers
+# ==============================================================================
+
+get_health_host_ip() {
+    local host="${1:-}"
+
+    case "$host" in
+        awx|ansible1|ansible2)
+            get_host_ip_for_role "$host"
             ;;
         win11)
-            fail "Deep local health checks are not supported for the Windows 11 host."
-            info "Use '$0 all' to validate Windows 11 hostname resolution."
-            exit 2
+            printf '%s\n' "$WIN11_IP"
+            ;;
+        "$GATEWAY_HOST")
+            printf '%s\n' "$GATEWAY_IP"
             ;;
         *)
-            fail "Invalid role: ${role}"
-            usage
-            exit 2
+            die "Unknown Lab 7 host: ${host}"
+            ;;
+    esac
+}
+
+get_health_host_fqdn() {
+    local host="${1:-}"
+
+    case "$host" in
+        awx|ansible1|ansible2)
+            get_host_fqdn_for_role "$host"
+            ;;
+        win11)
+            printf '%s\n' "$WIN11_FQDN"
+            ;;
+        "$GATEWAY_HOST")
+            printf '%s\n' "$GATEWAY_FQDN"
+            ;;
+        *)
+            die "Unknown Lab 7 host: ${host}"
             ;;
     esac
 }
@@ -191,39 +246,67 @@ resolve_host() {
 }
 
 show_resolution_result() {
-    local role="${1:-}"
-    local role_ip="${2:-}"
-    local role_fqdn="${3:-}"
+    local host="${1:-}"
+    local host_ip="${2:-}"
+    local host_fqdn="${3:-}"
 
-    if resolve_host "$role" "$role_fqdn"; then
+    if resolve_host "$host" "$host_fqdn"; then
         printf '%-10s %-16s %-32s %-10s\n' \
-            "$role" \
-            "$role_ip" \
-            "$role_fqdn" \
+            "$host" \
+            "$host_ip" \
+            "$host_fqdn" \
             "PASS"
     else
         printf '%-10s %-16s %-32s %-10s\n' \
-            "$role" \
-            "$role_ip" \
-            "$role_fqdn" \
+            "$host" \
+            "$host_ip" \
+            "$host_fqdn" \
             "FAIL"
     fi
 }
 
+get_resolution_result() {
+    local short_name="${1:-}"
+    local fqdn="${2:-}"
+    local result
+
+    result="$(
+        getent hosts "$short_name" 2>/dev/null |
+            head -n 1
+    )"
+
+    if [[ -n "$result" ]]; then
+        printf '%s\n' "$result"
+        return 0
+    fi
+
+    result="$(
+        getent hosts "$fqdn" 2>/dev/null |
+            head -n 1
+    )"
+
+    if [[ -n "$result" ]]; then
+        printf '%s\n' "$result"
+        return 0
+    fi
+
+    return 1
+}
+
 
 # ==============================================================================
-# All-Role Summary Helpers
+# All-Host Summary Helpers
 # ==============================================================================
 
-show_all_role_expectations() {
-    local role
-    local role_fqdn
-    local role_ip
+show_all_host_expectations() {
+    local host
+    local host_fqdn
+    local host_ip
 
-    step "Lab 7 role expectations"
+    step "Lab 7 host expectations"
 
     printf '%-10s %-16s %-32s %-10s\n' \
-        "ROLE" \
+        "HOST" \
         "IP" \
         "FQDN" \
         "RESOLUTION"
@@ -234,74 +317,49 @@ show_all_role_expectations() {
         "--------------------------------" \
         "----------"
 
-    for role in "${LAB7_ALL_ROLES[@]}"; do
-        role_ip="$(get_host_ip_for_role "$role")"
-        role_fqdn="$(get_host_fqdn_for_role "$role")"
+    for host in "${LAB7_ALL_HOSTS[@]}"; do
+        host_ip="$(get_health_host_ip "$host")"
+        host_fqdn="$(get_health_host_fqdn "$host")"
 
         show_resolution_result \
-            "$role" \
-            "$role_ip" \
-            "$role_fqdn"
+            "$host" \
+            "$host_ip" \
+            "$host_fqdn"
     done
 
-    if resolve_host "$GATEWAY_HOST" "$GATEWAY_FQDN"; then
-        printf '%-10s %-16s %-32s %-10s\n' \
-            "$GATEWAY_HOST" \
-            "$GATEWAY_IP" \
-            "$GATEWAY_FQDN" \
-            "PASS"
-    else
-        printf '%-10s %-16s %-32s %-10s\n' \
-            "$GATEWAY_HOST" \
-            "$GATEWAY_IP" \
-            "$GATEWAY_FQDN" \
-            "FAIL"
-    fi
+    show_resolution_result \
+        "$GATEWAY_HOST" \
+        "$GATEWAY_IP" \
+        "$GATEWAY_FQDN"
 }
 
-validate_all_role_resolution() {
+validate_all_host_resolution() {
     local failed=0
-    local role
-    local role_fqdn
+    local host
+    local host_fqdn
     local result
 
-    step "Validating all Lab 7 role name resolution"
+    step "Validating all Lab 7 host name resolution"
 
-    for role in "${LAB7_ALL_ROLES[@]}"; do
-        role_fqdn="$(get_host_fqdn_for_role "$role")"
+    for host in "${LAB7_ALL_HOSTS[@]}"; do
+        host_fqdn="$(get_health_host_fqdn "$host")"
 
-        if resolve_host "$role" "$role_fqdn"; then
-            result="$(
-                getent hosts "$role" 2>/dev/null |
-                    head -n 1
-            )"
+        if resolve_host "$host" "$host_fqdn"; then
+            result="$(get_resolution_result "$host" "$host_fqdn")"
 
-            if [[ -z "$result" ]]; then
-                result="$(
-                    getent hosts "$role_fqdn" 2>/dev/null |
-                        head -n 1
-                )"
-            fi
-
-            pass "Resolved ${role}: ${result}"
+            pass "Resolved ${host}: ${result}"
         else
-            fail "Could not resolve ${role} or ${role_fqdn}"
+            fail "Could not resolve ${host} or ${host_fqdn}"
             failed=1
         fi
     done
 
     if resolve_host "$GATEWAY_HOST" "$GATEWAY_FQDN"; then
         result="$(
-            getent hosts "$GATEWAY_HOST" 2>/dev/null |
-                head -n 1
+            get_resolution_result \
+                "$GATEWAY_HOST" \
+                "$GATEWAY_FQDN"
         )"
-
-        if [[ -z "$result" ]]; then
-            result="$(
-                getent hosts "$GATEWAY_FQDN" 2>/dev/null |
-                    head -n 1
-            )"
-        fi
 
         pass "Resolved ${GATEWAY_HOST}: ${result}"
     else
@@ -315,25 +373,25 @@ validate_all_role_resolution() {
 run_all_mode() {
     local failed=0
 
-    step "Starting Lab 7 all-role health overview"
+    step "Starting Lab 7 all-host health overview"
 
     info "Repository base directory: ${BASE_DIR}"
     info "Mode: all"
 
-    show_all_role_expectations
+    show_all_host_expectations
 
-    if ! validate_all_role_resolution; then
+    if ! validate_all_host_resolution; then
         failed=1
     fi
 
-    step "All-role overview summary"
+    step "All-host overview summary"
 
     if [[ "$failed" -eq 0 ]]; then
-        pass "All Lab 7 roles resolve successfully from this node"
+        pass "All Lab 7 hosts resolve successfully from this node"
         return 0
     fi
 
-    fail "One or more Lab 7 roles failed to resolve from this node"
+    fail "One or more Lab 7 hosts failed to resolve from this node"
     return 1
 }
 
@@ -364,6 +422,36 @@ record_check_status() {
 
 
 # ==============================================================================
+# Required Command Checks
+# ==============================================================================
+
+check_required_health_commands() {
+    local failed=0
+
+    step "Checking required local commands"
+
+    require_command hostname
+    require_command hostnamectl
+    require_command getent
+    require_command ip
+    require_command ping
+    require_command systemctl
+    require_command df
+    require_command free
+    require_command awk
+
+    if command -v nmcli >/dev/null 2>&1; then
+        pass "Required command found: nmcli"
+    else
+        fail "Required command not found: nmcli"
+        failed=1
+    fi
+
+    return "$failed"
+}
+
+
+# ==============================================================================
 # Single-Role Deep Health Check Logic
 # ==============================================================================
 
@@ -386,22 +474,7 @@ run_single_role_health_check() {
     info "Expected IP: ${expected_ip}/${SUBNET_PREFIX}"
     info "Expected gateway: ${GATEWAY_IP}"
 
-    step "Checking required local commands"
-
-    require_command hostname
-    require_command hostnamectl
-    require_command getent
-    require_command ip
-    require_command ping
-    require_command systemctl
-    require_command df
-    require_command free
-    require_command awk
-
-    if command -v nmcli >/dev/null 2>&1; then
-        pass "Required command found: nmcli"
-    else
-        fail "Required command not found: nmcli"
+    if ! check_required_health_commands; then
         failed=1
     fi
 
